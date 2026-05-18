@@ -1,5 +1,4 @@
 streamlit
 img2pdf
 pillow
-markdown
-xhtml2pdf
+markdown-pdf
