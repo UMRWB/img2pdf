@@ -296,3 +296,12 @@ with st.expander("ℹ️ Features"):
 - **Sorting**: images are sorted by filename (A→Z or Z→A) before conversion.
 - **Preview**: image previews use small thumbnails inside an expander for faster loading.
 - **PDF quality presets**:
+  - *Original* — lossless, images embedded as-is.
+  - *Balanced* — resizes images > 2048 px and re-encodes to JPEG quality 82.
+  - *Compressed* — resizes to 1280 px max and re-encodes to JPEG quality 65.
+- **Markdown to PDF**: powered by `markdown-pdf` with a clean, styled layout.
+        """
+    )
+
+st.markdown("---")
+st.caption("Built with Streamlit · img2pdf · pillow-heif · markdown-pdf")
