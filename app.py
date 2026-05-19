@@ -237,22 +237,47 @@ with image_tab:
 # ── Markdown tab ──────────────────────────────────────────────────────────────
 with markdown_tab:
     st.subheader("Markdown to PDF")
-    st.write("Upload a Markdown file, preview it, and export it as a styled PDF.")
+    st.write("Upload a Markdown file **or** paste plain text / Markdown directly.")
 
-    uploaded_markdown = st.file_uploader(
-        "Choose a Markdown file",
-        type=["md", "markdown"],
-        accept_multiple_files=False,
-        key="markdown_uploader",
+    md_source = st.radio(
+        "Input source",
+        options=["Upload .md file", "Paste text"],
+        horizontal=True,
+        key="md_source",
     )
 
-    if uploaded_markdown is not None:
-        markdown_text = read_uploaded_text(uploaded_markdown)
-        default_name = sanitize_filename(
-            uploaded_markdown.name.rsplit(".", 1)[0], "converted_markdown"
-        )
+    markdown_text = None
+    default_name = "converted_markdown"
 
-        st.success(f"✓ Uploaded: {uploaded_markdown.name}")
+    if md_source == "Upload .md file":
+        uploaded_markdown = st.file_uploader(
+            "Choose a Markdown file",
+            type=["md", "markdown"],
+            accept_multiple_files=False,
+            key="markdown_uploader",
+        )
+        if uploaded_markdown is not None:
+            markdown_text = read_uploaded_text(uploaded_markdown)
+            default_name = sanitize_filename(
+                uploaded_markdown.name.rsplit(".", 1)[0], "converted_markdown"
+            )
+            st.success(f"✓ Uploaded: {uploaded_markdown.name}")
+        else:
+            st.info("👆 Upload a Markdown file to get started")
+
+    else:  # Paste text
+        pasted = st.text_area(
+            "Paste your text or Markdown here",
+            height=300,
+            placeholder='# My Document\n\nPaste plain text or Markdown here...',
+            key="md_paste",
+        )
+        if pasted.strip():
+            markdown_text = pasted
+        else:
+            st.info("👆 Paste some text above to get started")
+
+    if markdown_text:
         markdown_pdf_filename = st.text_input(
             "Output filename (without extension)",
             value=default_name,
@@ -265,7 +290,7 @@ with markdown_tab:
         with st.expander("Show raw Markdown"):
             st.code(markdown_text, language="markdown")
 
-        if st.button("🔄 Convert Markdown to PDF", type="primary", key="markdown_convert"):
+        if st.button("🔄 Convert to PDF", type="primary", key="markdown_convert"):
             try:
                 with st.spinner("Converting Markdown to PDF..."):
                     final_name = sanitize_filename(markdown_pdf_filename, "converted_markdown")
@@ -285,8 +310,6 @@ with markdown_tab:
             except Exception as exc:
                 st.error(f"❌ Error converting Markdown to PDF: {exc}")
                 st.exception(exc)
-    else:
-        st.info("👆 Upload a Markdown file to get started")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 with st.expander("ℹ️ Features"):
@@ -299,7 +322,7 @@ with st.expander("ℹ️ Features"):
   - *Original* — lossless, images embedded as-is.
   - *Balanced* — resizes images > 2048 px and re-encodes to JPEG quality 82.
   - *Compressed* — resizes to 1280 px max and re-encodes to JPEG quality 65.
-- **Markdown to PDF**: powered by `markdown-pdf` with a clean, styled layout.
+- **Markdown to PDF**: powered by `markdown-pdf`; accepts uploaded `.md` files or pasted plain text / Markdown.
         """
     )
 
