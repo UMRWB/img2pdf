@@ -1,19 +1,21 @@
-import tempfile
+import io
 import re
+import tempfile
 from pathlib import Path
 
 import img2pdf
 import streamlit as st
 from markdown_pdf import MarkdownPdf, Section
 from PIL import Image
+from pillow_heif import register_heif_opener
 
+register_heif_opener()
 
 st.set_page_config(
     page_title="File to PDF Converter",
     page_icon="📄",
     layout="centered",
 )
-
 
 MARKDOWN_CSS = """
 body {
@@ -48,14 +50,15 @@ table, th, td {
     border: 1px solid #d1d5db;
     border-collapse: collapse;
 }
-th, td {
-    padding: 8px;
-    vertical-align: top;
-}
-a {
-    color: #2563eb;
-}
+th, td { padding: 8px; vertical-align: top; }
+a { color: #2563eb; }
 """
+
+QUALITY_PRESETS = {
+    "Original (lossless)": {"max_dim": None, "jpeg_quality": None},
+    "Balanced":            {"max_dim": 2048,  "jpeg_quality": 82},
+    "Compressed":          {"max_dim": 1280,  "jpeg_quality": 65},
+}
 
 
 def sanitize_filename(name: str, fallback: str) -> str:
@@ -65,27 +68,54 @@ def sanitize_filename(name: str, fallback: str) -> str:
 
 
 def natural_sort_key(text: str):
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", text)]
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", text)]
 
 
 def sort_uploaded_images(files, sort_mode: str):
     reverse = sort_mode == "Filename Z → A"
-    return sorted(files, key=lambda item: natural_sort_key(item.name), reverse=reverse)
+    return sorted(files, key=lambda f: natural_sort_key(f.name), reverse=reverse)
 
 
-def convert_images_to_pdf(uploaded_files):
-    image_bytes_list = []
-    for uploaded_file in uploaded_files:
-        uploaded_file.seek(0)
-        image_bytes_list.append(uploaded_file.read())
+def preprocess_image(uploaded_file, max_dim, jpeg_quality):
+    """
+    If max_dim or jpeg_quality is set, decode → optionally resize → re-encode to JPEG.
+    Otherwise return the raw bytes unchanged for lossless embedding.
+    """
+    uploaded_file.seek(0)
+    if max_dim is None and jpeg_quality is None:
+        return uploaded_file.read()
+
+    img = Image.open(uploaded_file)
+
+    # Convert palette / RGBA to RGB for JPEG re-encoding
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    # Resize if largest dimension exceeds max_dim
+    if max_dim is not None:
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    return buf.getvalue()
+
+
+def convert_images_to_pdf(uploaded_files, quality_preset: str):
+    preset = QUALITY_PRESETS[quality_preset]
+    max_dim = preset["max_dim"]
+    jpeg_quality = preset["jpeg_quality"]
+    image_bytes_list = [preprocess_image(f, max_dim, jpeg_quality) for f in uploaded_files]
     return img2pdf.convert(image_bytes_list)
 
 
 def read_uploaded_text(uploaded_file) -> str:
     raw = uploaded_file.getvalue()
-    for encoding in ("utf-8", "utf-8-sig", "utf-16", "latin-1"):
+    for enc in ("utf-8", "utf-8-sig", "utf-16", "latin-1"):
         try:
-            return raw.decode(encoding)
+            return raw.decode(enc)
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
@@ -95,10 +125,8 @@ def convert_markdown_to_pdf(markdown_text: str, document_title: str):
     pdf = MarkdownPdf(toc_level=2)
     pdf.meta["title"] = document_title
     pdf.add_section(Section(markdown_text), user_css=MARKDOWN_CSS)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-        tmp_path = tmp_pdf.name
-
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp_path = tmp.name
     try:
         pdf.save(tmp_path)
         return Path(tmp_path).read_bytes()
@@ -106,38 +134,56 @@ def convert_markdown_to_pdf(markdown_text: str, document_title: str):
         Path(tmp_path).unlink(missing_ok=True)
 
 
+# ── UI ────────────────────────────────────────────────────────────────────────
+
 st.title("📄 File to PDF Converter")
 st.markdown("Convert **images** or **Markdown** files into downloadable PDF documents.")
 
 image_tab, markdown_tab = st.tabs(["🖼️ Image to PDF", "📝 Markdown to PDF"])
 
+# ── Image tab ─────────────────────────────────────────────────────────────────
 with image_tab:
     st.subheader("Image to PDF")
-    st.write("Upload one or more JPG, PNG, or WebP files, sort them, and combine them into a single PDF.")
+    st.write("Upload images, choose a sort order and quality preset, then convert.")
 
     uploaded_images = st.file_uploader(
         "Choose image files",
-        type=["jpg", "jpeg", "png", "webp"],
+        type=["jpg", "jpeg", "png", "webp", "heif", "heic", "heifs", "heics", "hif"],
         accept_multiple_files=True,
-        help="Select one or more image files to convert to a single PDF.",
+        help="Supports JPG, PNG, WebP, and HEIF/HEIC formats.",
         key="image_uploader",
     )
 
     if uploaded_images:
         st.success(f"✓ {len(uploaded_images)} file(s) uploaded")
 
-        sort_mode = st.radio(
-            "Sort images before conversion",
-            options=["Filename A → Z", "Filename Z → A"],
-            horizontal=True,
-            key="image_sort_mode",
-        )
+        col_sort, col_quality = st.columns(2)
+
+        with col_sort:
+            sort_mode = st.radio(
+                "Sort order",
+                options=["Filename A → Z", "Filename Z → A"],
+                key="image_sort_mode",
+            )
+
+        with col_quality:
+            quality_preset = st.radio(
+                "PDF quality",
+                options=list(QUALITY_PRESETS.keys()),
+                key="image_quality",
+                help=(
+                    "**Original**: lossless — images embedded as-is, largest files.\n\n"
+                    "**Balanced**: resizes images > 2048 px and re-encodes to JPEG 82.\n\n"
+                    "**Compressed**: resizes to 1280 px max and re-encodes to JPEG 65."
+                ),
+            )
+
         sorted_images = sort_uploaded_images(uploaded_images, sort_mode)
 
         st.subheader("Sorted order")
         st.caption("The PDF page order will follow this list.")
-        for index, file in enumerate(sorted_images, start=1):
-            st.write(f"{index}. {file.name}")
+        for idx, f in enumerate(sorted_images, 1):
+            st.write(f"{idx}. {f.name}")
 
         st.subheader("Preview")
         cols_per_row = 3
@@ -147,8 +193,8 @@ with image_tab:
                 if i + j < len(sorted_images):
                     with col:
                         file = sorted_images[i + j]
-                        image = Image.open(file)
-                        st.image(image, caption=f"{i + j + 1}. {file.name}", use_container_width=True)
+                        img = Image.open(file)
+                        st.image(img, caption=f"{i+j+1}. {file.name}", use_container_width=True)
                         file.seek(0)
 
         image_pdf_filename = st.text_input(
@@ -160,7 +206,7 @@ with image_tab:
         if st.button("🔄 Convert images to PDF", type="primary", key="image_convert"):
             try:
                 with st.spinner("Converting images to PDF..."):
-                    pdf_bytes = convert_images_to_pdf(sorted_images)
+                    pdf_bytes = convert_images_to_pdf(sorted_images, quality_preset)
 
                 final_name = sanitize_filename(image_pdf_filename, "converted_images")
                 st.success("✓ PDF created successfully!")
@@ -172,30 +218,31 @@ with image_tab:
                     type="primary",
                     key="image_download",
                 )
-
                 pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
-                st.info(f"📊 PDF size: {pdf_size_mb:.2f} MB | Pages: {len(sorted_images)}")
+                st.info(f"📊 PDF size: {pdf_size_mb:.2f} MB | Pages: {len(sorted_images)} | Quality: {quality_preset}")
             except Exception as exc:
                 st.error(f"❌ Error converting images to PDF: {exc}")
                 st.exception(exc)
     else:
         st.info("👆 Upload image files to get started")
 
+# ── Markdown tab ──────────────────────────────────────────────────────────────
 with markdown_tab:
     st.subheader("Markdown to PDF")
-    st.write("Upload a Markdown file, preview it, and export it as a PDF using the markdown-pdf library.")
+    st.write("Upload a Markdown file, preview it, and export it as a styled PDF.")
 
     uploaded_markdown = st.file_uploader(
         "Choose a Markdown file",
         type=["md", "markdown"],
         accept_multiple_files=False,
-        help="Upload a .md or .markdown file.",
         key="markdown_uploader",
     )
 
     if uploaded_markdown is not None:
         markdown_text = read_uploaded_text(uploaded_markdown)
-        default_name = sanitize_filename(uploaded_markdown.name.rsplit('.', 1)[0], "converted_markdown")
+        default_name = sanitize_filename(
+            uploaded_markdown.name.rsplit(".", 1)[0], "converted_markdown"
+        )
 
         st.success(f"✓ Uploaded: {uploaded_markdown.name}")
         markdown_pdf_filename = st.text_input(
@@ -225,7 +272,6 @@ with markdown_tab:
                     type="primary",
                     key="markdown_download",
                 )
-
                 pdf_size_kb = len(pdf_bytes) / 1024
                 st.info(f"📊 PDF size: {pdf_size_kb:.1f} KB")
             except Exception as exc:
@@ -234,15 +280,19 @@ with markdown_tab:
     else:
         st.info("👆 Upload a Markdown file to get started")
 
+# ── Footer ────────────────────────────────────────────────────────────────────
 with st.expander("ℹ️ Features"):
     st.markdown(
         """
-- Image mode supports JPG, JPEG, PNG, and WebP.
-- Uploaded images are sorted by filename before conversion.
-- Markdown mode uses the `markdown-pdf` library for PDF generation.
-- PDF files are generated in memory and downloaded directly from the app.
+- **Image to PDF**: supports JPG, PNG, WebP, and HEIF/HEIC formats.
+- **Sorting**: images are sorted by filename (A→Z or Z→A) before conversion.
+- **PDF quality presets**:
+  - *Original* — lossless, images embedded as-is.
+  - *Balanced* — resizes images > 2048 px and re-encodes to JPEG quality 82.
+  - *Compressed* — resizes to 1280 px max and re-encodes to JPEG quality 65.
+- **Markdown to PDF**: powered by `markdown-pdf` with a clean, styled layout.
         """
     )
 
 st.markdown("---")
-st.caption("Built with Streamlit, img2pdf, pillow, and markdown-pdf")
+st.caption("Built with Streamlit · img2pdf · pillow-heif · markdown-pdf")
